@@ -3,12 +3,12 @@ set -o nounset
 set -o pipefail
 
 
-# code-generator does work with go.mod but makes assumptions about the project living in `$GOPATH/src`. 
-# To work around this and support any location: 
+# code-generator does work with go.mod but makes assumptions about the project living in `$GOPATH/src`.
+# To work around this and support any location:
 #   create a temporary directory, use this as an output base, and copy everything back once generated.
 export GOPATH=$(go env GOPATH) # export gopath so it's available to generate scripts
 SCRIPT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." >/dev/null 2>&1 && pwd )"
-CODEGEN_VERSION=$(go list -m k8s.io/code-generator | awk '{print $2}' | head -1)
+CODEGEN_VERSION=$(go list -m k8s.io/code-generator | awk '{print $NF}' | head -1)
 CODEGEN_PKG="${GOPATH}/pkg/mod/k8s.io/code-generator@${CODEGEN_VERSION}"
 TEMP_DIR=$(mktemp -d)
 cleanup() {

@@ -3,9 +3,9 @@ package metricproviders
 import (
 	"fmt"
 
-	"github.com/argoproj/argo-rollouts/metricproviders/wavefront"
-
+	"github.com/argoproj/argo-rollouts/metricproviders/datadog"
 	"github.com/argoproj/argo-rollouts/metricproviders/kayenta"
+	"github.com/argoproj/argo-rollouts/metricproviders/wavefront"
 	"github.com/argoproj/argo-rollouts/metricproviders/webmetric"
 
 	log "github.com/sirupsen/logrus"
@@ -66,6 +66,12 @@ func (f *ProviderFactory) NewProvider(logCtx log.Entry, metric v1alpha1.Metric) 
 			return nil, err
 		}
 		return wavefront.NewWavefrontProvider(client, logCtx), nil
+	} else if metric.Provider.Datadog != nil {
+		client, err := datadog.NewDatadogAPI(metric, f.KubeClient)
+		if err != nil {
+			return nil, err
+		}
+		return datadog.NewDatadogProvider(*client, logCtx), nil
 	}
 	return nil, fmt.Errorf("no valid provider in metric '%s'", metric.Name)
 }

@@ -104,6 +104,7 @@ func (m *Metric) EffectiveCount() *int32 {
 type MetricProvider struct {
 	// Prometheus specifies the prometheus metric to query
 	Prometheus *PrometheusMetric `json:"prometheus,omitempty"`
+	Datadog    *DatadogMetric    `json:"datadog,omitempty"`
 	Kayenta    *KayentaMetric    `json:"kayenta,omitempty"`
 	Web        *WebMetric        `json:"web,omitempty"`
 	// Wavefront specifies the wavefront metric to query
@@ -132,6 +133,14 @@ func (as AnalysisPhase) Completed() bool {
 		return true
 	}
 	return false
+}
+
+// DatadogMetric defines the datadog query to perform canary analysis
+type DatadogMetric struct {
+	// BaseUrl is the DataDog site to connect the client to
+	BaseURL string `json:"baseURL,omitempty"`
+	// Query is a raw datadog query to perform
+	Query string `json:"query"`
 }
 
 // PrometheusMetric defines the prometheus query to perform canary analysis
