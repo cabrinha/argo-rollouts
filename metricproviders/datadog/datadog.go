@@ -3,6 +3,7 @@ package datadog
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
@@ -36,49 +37,17 @@ func (p *Provider) Type() string {
 
 // Run queries DataDog for a metric
 func (p *Provider) Run(run *v1alpha1.AnalysisRun, metric v1alpha1.Metric) v1alpha1.Measurement {
-	startTime := metav1.Now()
-	newMeasurement := v1alpha1.Measurement{
-		StartedAt: &startTime,
-	}
-
-	query, err := templateutil.ResolveArgs(metric.Provider.Datadog.Query, run.Spec.Args)
-	if err != nil {
-		return metricutil.MarkMeasurementError(newMeasurement, err)
-	}
-
-	// TODO (cabrinha) make from and to configurable
-	from := time.Now().Unix() - 60
-	to := time.Now().Unix()
-	response, err := p.client.QueryMetrics(from, to, query)
-	if err != nil {
-		return metricutil.MarkMeasurementError(newMeasurement, err)
-	}
-
-	if len(response) > 0 {
-		newValue, newStatus, err := p.processResponse(metric, response[0])
-		if err != nil {
-			return metricutil.MarkMeasurementError(newMeasurement, err)
-		}
-		newMeasurement.Value = newValue
-		newMeasurement.Phase = newStatus
-		finishedTime := metav1.Now()
-		newMeasurement.FinishedAt = &finishedTime
-		return newMeasurement
-	}
-	newMeasurement.Value = ""
-	newMeasurement.Phase = v1alpha1.AnalysisPhaseInconclusive
-	finishedTime := metav1.Now()
-	newMeasurement.FinishedAt = &finishedTime
-	return newMeasurement
+	measurement := p.runMeasurement(run, metric)
+	return measurement
 }
 
 // Resume executes Run if the analysis phase is inconclusive or until 3 retries have been executed
 func (p *Provider) Resume(run *v1alpha1.AnalysisRun, metric v1alpha1.Metric, measurement v1alpha1.Measurement) v1alpha1.Measurement {
-	measurement = p.Run(run, metric)
+	measurement = p.runMeasurement(run, metric)
 	var retries int
-	for retries = 0; retries < 3 && measurement.Phase == v1alpha1.AnalysisPhaseInconclusive; retries++ {
-		measurement = p.Run(run, metric)
-		if measurement.Value != "" {
+	for retries = 0; retries < 3 && measurement.Phase != v1alpha1.AnalysisPhaseSuccessful; retries++ {
+		measurement = p.runMeasurement(run, metric)
+		if measurement.Value == "" {
 			time.Sleep(1 * time.Second)
 		}
 		return measurement
@@ -97,28 +66,83 @@ func (p *Provider) GarbageCollect(run *v1alpha1.AnalysisRun, metric v1alpha1.Met
 	return nil
 }
 
-// flattenResponse removes the unix timestamp from a []DataPoint and flattens all values into a []float64
-func flattenResponse(dp []dd.DataPoint) []float64 {
-	flat := make([]float64, len(dp))
-	for _, v := range dp {
-		flat = append(flat, *v[1])
+func (p *Provider) runMeasurement(run *v1alpha1.AnalysisRun, metric v1alpha1.Metric) v1alpha1.Measurement {
+	startTime := metav1.Now()
+	newMeasurement := v1alpha1.Measurement{
+		StartedAt: &startTime,
 	}
-	return flat
+
+	query, err := templateutil.ResolveArgs(metric.Provider.Datadog.Query, run.Spec.Args)
+	if err != nil {
+		return metricutil.MarkMeasurementError(newMeasurement, err)
+	}
+
+	// TODO (cabrinha) make from and to configurable
+	from := time.Now().Unix() - 60
+	to := time.Now().Unix()
+	response, err := p.client.QueryMetrics(from, to, query)
+	if err != nil {
+		return metricutil.MarkMeasurementError(newMeasurement, err)
+	}
+	newValue, newStatus, err := p.processResponse(metric, response)
+	if err != nil {
+		return metricutil.MarkMeasurementError(newMeasurement, err)
+	}
+
+	if newValue == "" && newStatus != v1alpha1.AnalysisPhaseSuccessful {
+		resumeTime := metav1.NewTime(time.Now().Add(2 * time.Second))
+		newMeasurement.FinishedAt = nil
+		newMeasurement.Phase = v1alpha1.AnalysisPhaseRunning
+		newMeasurement.ResumeAt = &resumeTime
+	} else if newValue != "" && newStatus == v1alpha1.AnalysisPhaseSuccessful {
+		finishedTime := metav1.Now()
+		newMeasurement.FinishedAt = &finishedTime
+		newMeasurement.Phase = newStatus
+	}
+	newMeasurement.Value = newValue
+	return newMeasurement
 }
 
-func (p *Provider) processResponse(metric v1alpha1.Metric, response dd.Series) (string, v1alpha1.AnalysisPhase, error) {
-	length := len(response.Points)
-	switch {
-	case length < 1:
-		return "", v1alpha1.AnalysisPhaseInconclusive, nil
-	case length >= 1:
-		result := flattenResponse(response.Points)
-		valueStr := fmt.Sprintf("%f", result)
-		newStatus := evaluate.EvaluateResult(result, metric, p.logCtx)
-		return valueStr, newStatus, nil
-	default:
-		return "", v1alpha1.AnalysisPhaseError, fmt.Errorf("failed to process metrics")
+// flattenResponse removes the unix timestamp from a []DataPoint, flattens all values into a []float64
+// and returns a []float64 and a string of [float64, ...]
+func flattenResponse(dp []dd.DataPoint) ([]float64, string) {
+	floats := make([]float64, len(dp))
+
+	if len(dp) > 2 {
+		valueStr := "["
+		for _, v := range dp {
+			floats = append(floats, *v[1])
+			valueStr = valueStr + fmt.Sprintf("%.2f", *v[1]) + ","
+		}
+
+		if len(valueStr) > 1 {
+			valueStr = valueStr[:len(valueStr)-1] + "]" // strip last comma
+		} else {
+			valueStr = ""
+		}
+		return floats, valueStr
 	}
+
+	valueStr := fmt.Sprintf("%.2f", *dp[0][1])
+	return floats, valueStr
+}
+
+func (p *Provider) processResponse(metric v1alpha1.Metric, response []dd.Series) (string, v1alpha1.AnalysisPhase, error) {
+	if len(response) == 0 {
+		return "", v1alpha1.AnalysisPhaseInconclusive, nil
+	} else if len(response) >= 1 {
+		series := response[0]
+		results, valueStr := flattenResponse(series.Points)
+		for _, result := range results {
+			if math.IsNaN(result) {
+				return valueStr, v1alpha1.AnalysisPhaseInconclusive, nil
+			}
+		}
+		newStatus := evaluate.EvaluateResult(results, metric, p.logCtx)
+		return valueStr, newStatus, nil
+	}
+
+	return "", v1alpha1.AnalysisPhaseFailed, fmt.Errorf("No data points found in response from Datadog")
 }
 
 // NewDatadogProvider creates a new Datadog client

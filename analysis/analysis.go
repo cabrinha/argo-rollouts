@@ -319,6 +319,7 @@ func (c *AnalysisController) runMeasurements(run *v1alpha1.AnalysisRun, tasks []
 							newMeasurement.Message = "metric terminated"
 						}
 					} else {
+						log.Infof("resuming in-progress measurement")
 						newMeasurement = provider.Resume(run, t.metric, *t.incompleteMeasurement)
 					}
 				}
